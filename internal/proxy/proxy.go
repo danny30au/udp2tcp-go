@@ -77,13 +77,18 @@ func RunUDPToTCP(cfg *config.Config, workerID int) error {
 
 		if created {
 			metrics.SessionsActive.Add(1)
-			slog.Debug("new session", "worker", workerID, "client", srcAddr)
+			slog.Info("new session", "worker", workerID, "client", srcAddr)
 			go tcpForwardTask(cfg, udpConn, srcAddr, sess, table, workerID)
 		}
 
-		select {
-		case sess.Ch <- session.Packet{Data: data}:
-		default:
+		sent, closed := sess.TrySend(session.Packet{Data: data})
+		if closed {
+			// Sweeper closed the session between our GetOrCreate and now.
+			// Drop the packet; a subsequent packet from the same client will
+			// create a fresh session.
+			metrics.IncErrors()
+			slog.Debug("session closed during send, dropping packet", "client", srcAddr)
+		} else if !sent {
 			metrics.IncErrors()
 			slog.Debug("channel full, dropping packet", "client", srcAddr)
 		}
@@ -133,8 +138,14 @@ func tcpForwardTask(
 			_ = c.Close()
 		}
 	}
+	// dialTimeout bounds how long a single TCP connect may block. Without
+	// this, net.Dial inherits the OS TCP connect timeout (~75-130s on Linux
+	// when SYNs are silently dropped), which delays error visibility long
+	// past the point an operator gives up debugging.
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+
 	for i := 0; i < streams; i++ {
-		c, err := net.Dial("tcp", cfg.Remote)
+		c, err := dialer.Dial("tcp", cfg.Remote)
 		if err != nil {
 			metrics.IncErrors()
 			slog.Error("TCP dial failed", "worker", workerID,
@@ -236,7 +247,7 @@ func tcpForwardTask(
 // RunTCPToUDP accepts TCP connections and forwards each WireGuard frame as
 // a raw UDP datagram to cfg.Remote, sending replies back as TCP frames.
 func RunTCPToUDP(cfg *config.Config, workerID int) error {
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ln, err := listenTCP(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -342,6 +353,12 @@ func applyTCPOpts(conn net.Conn, cfg *config.Config) {
 		}
 		_ = tc.SetReadBuffer(cfg.TCPBuf)
 		_ = tc.SetWriteBuffer(cfg.TCPBuf)
+		// Detect silently-dropped TCP sessions (stateful NAT/firewall idle
+		// expiry is the most common cause). Without keep-alives, both ends
+		// can sit on a half-open connection indefinitely with no traffic
+		// flowing in either direction.
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(30 * time.Second)
 	}
 }
 

@@ -13,9 +13,12 @@ const daemonizedEnv = "UDP2TCP_DAEMONIZED"
 // daemonize re-executes the current process with stdio detached and exits
 // the parent. The child sees daemonizedEnv=1 and continues normally. When
 // pidFile is non-empty, the parent writes the child's PID to it before exit.
+// When logFile is non-empty, the child's stdout and stderr are appended to
+// that file instead of being discarded to /dev/null — without this, the
+// daemonized child has no way to surface startup or runtime errors.
 //
 // Returns true in the parent (which will then exit), false in the child.
-func daemonize(pidFile string) (bool, error) {
+func daemonize(pidFile, logFile string) (bool, error) {
 	if os.Getenv(daemonizedEnv) == "1" {
 		// Already the detached child — nothing to do.
 		return false, nil
@@ -32,11 +35,21 @@ func daemonize(pidFile string) (bool, error) {
 	}
 	defer devNull.Close()
 
+	var stdout, stderr *os.File = devNull, devNull
+	if logFile != "" {
+		lf, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+		if err != nil {
+			return false, fmt.Errorf("daemonize: open log file %q: %w", logFile, err)
+		}
+		defer lf.Close()
+		stdout, stderr = lf, lf
+	}
+
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Env = append(os.Environ(), daemonizedEnv+"=1")
 	cmd.Stdin = devNull
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	cmd.SysProcAttr = sysProcAttrDetached()
 
 	if err := cmd.Start(); err != nil {

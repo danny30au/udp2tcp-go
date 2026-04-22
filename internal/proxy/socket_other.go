@@ -30,3 +30,21 @@ func listenUDP(ctx context.Context, cfg *config.Config) (net.PacketConn, error) 
 	}
 	return lc.ListenPacket(ctx, "udp", cfg.Listen)
 }
+
+// listenTCP binds a TCP listener. SO_REUSEPORT is unavailable or has
+// different semantics on non-Linux platforms; we still set SO_REUSEADDR
+// for fast rebind after restart.
+func listenTCP(ctx context.Context, cfg *config.Config) (net.Listener, error) {
+	lc := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				ifd := int(fd)
+				_ = syscall.SetsockoptInt(ifd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				if cfg.ReusePort {
+					slog.Warn("SO_REUSEPORT (tcp) not supported on this platform — using single socket")
+				}
+			})
+		},
+	}
+	return lc.Listen(ctx, "tcp", cfg.Listen)
+}

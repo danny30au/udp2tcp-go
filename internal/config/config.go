@@ -29,6 +29,7 @@ type Config struct {
 	LogLevel    string // debug | info | warn | error
 	Daemon      bool   // detach from terminal and run in background
 	PIDFile     string // path to write PID file (empty disables)
+	LogFile     string // path to log file (empty = stdout)
 }
 
 func Parse() (*Config, error) {
@@ -51,6 +52,7 @@ func Parse() (*Config, error) {
 	flag.StringVar(&cfg.LogLevel, "log-level", env("UDP2TCP_LOG_LEVEL", "info"), "Log level: debug|info|warn|error")
 	flag.BoolVar(&cfg.Daemon, "daemon", envBool("UDP2TCP_DAEMON", false), "Detach from terminal and run as a background daemon")
 	flag.StringVar(&cfg.PIDFile, "pidfile", env("UDP2TCP_PIDFILE", ""), "Write process PID to this file (removed on exit)")
+	flag.StringVar(&cfg.LogFile, "log-file", env("UDP2TCP_LOG_FILE", ""), "Append logs to this file instead of stdout (required for diagnostics in -daemon mode)")
 
 	flag.Parse()
 
