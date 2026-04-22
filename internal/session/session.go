@@ -23,6 +23,7 @@ type Session struct {
 	Ch       chan Packet
 	LastSeen time.Time
 	mu       sync.Mutex
+	closed   bool // true once Ch has been closed; guarded by mu
 }
 
 func (s *Session) Touch() {
@@ -36,6 +37,42 @@ func (s *Session) IsIdle(timeout time.Duration) bool {
 	idle := time.Since(s.LastSeen) > timeout
 	s.mu.Unlock()
 	return idle
+}
+
+// TrySend delivers pkt on s.Ch without risking a send-on-closed-channel
+// panic if a concurrent sweeper has already closed the channel. It returns
+// (sent=true, closed=false) on success, (false, false) if the channel was
+// full, and (false, true) if the session has been closed.
+func (s *Session) TrySend(pkt Packet) (sent bool, closed bool) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false, true
+	}
+	// Hold s.mu for the send so SweepIdle cannot close Ch between our
+	// closed-check and the send. Ch is buffered so the send is non-blocking
+	// when there is room; the select's default branch handles a full buffer
+	// without blocking under the lock.
+	select {
+	case s.Ch <- pkt:
+		s.mu.Unlock()
+		return true, false
+	default:
+		s.mu.Unlock()
+		return false, false
+	}
+}
+
+// close marks the session as closed and closes Ch. Safe to call multiple
+// times concurrently; only the first call closes the channel. Synchronization
+// with concurrent TrySend callers is provided entirely by s.mu.
+func (s *Session) close() {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.Ch)
+	}
+	s.mu.Unlock()
 }
 
 // Table is a sharded concurrent map of SocketAddr → *Session.
@@ -132,7 +169,7 @@ func (t *Table) SweepIdle() int {
 		s.mu.Lock()
 		for k, sess := range s.entries {
 			if sess.IsIdle(t.timeout) {
-				close(sess.Ch)
+				sess.close()
 				delete(s.entries, k)
 				removed++
 			}

@@ -49,3 +49,27 @@ func listenUDP(ctx context.Context, cfg *config.Config) (net.PacketConn, error) 
 	}
 	return lc.ListenPacket(ctx, "udp", cfg.Listen)
 }
+
+// listenTCP binds a TCP listener with the same SO_REUSEPORT treatment as
+// listenUDP, so multiple worker goroutines (in reverse mode) can share the
+// same accept queue and the kernel distributes incoming connections.
+func listenTCP(ctx context.Context, cfg *config.Config) (net.Listener, error) {
+	lc := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				ifd := int(fd)
+
+				if err := unix.SetsockoptInt(ifd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+					slog.Warn("SO_REUSEADDR (tcp) failed", "err", err)
+				}
+
+				if cfg.ReusePort {
+					if err := unix.SetsockoptInt(ifd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+						slog.Warn("SO_REUSEPORT (tcp) not available", "err", err)
+					}
+				}
+			})
+		},
+	}
+	return lc.Listen(ctx, "tcp", cfg.Listen)
+}

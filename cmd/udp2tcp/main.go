@@ -27,7 +27,7 @@ func main() {
 	// ourselves detached and exit. The child sees UDP2TCP_DAEMONIZED=1
 	// and falls through to normal startup below.
 	if cfg.Daemon {
-		isParent, derr := daemonize(cfg.PIDFile)
+		isParent, derr := daemonize(cfg.PIDFile, cfg.LogFile)
 		if derr != nil {
 			slog.Error("daemonize failed", "err", derr)
 			os.Exit(1)
@@ -57,7 +57,24 @@ func main() {
 	case "error":
 		lvl = slog.LevelError
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})))
+	// In daemon mode, the parent has already wired the child's stdout/stderr
+	// to LogFile via daemonize(); we just write to stdout here as usual. In
+	// non-daemon mode we open LogFile directly so foreground users can opt
+	// into file logging too.
+	logOut := os.Stdout
+	if cfg.LogFile != "" && !cfg.Daemon {
+		f, err := os.OpenFile(cfg.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+		if err != nil {
+			slog.Error("open log file", "path", cfg.LogFile, "err", err)
+			os.Exit(1)
+		}
+		// slog's text handler writes are unbuffered, but defer the Close
+		// so a future refactor that returns from main (instead of os.Exit)
+		// still flushes the file descriptor cleanly.
+		defer f.Close()
+		logOut = f
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{Level: lvl})))
 
 	// Set GOMAXPROCS to the configured thread count.
 	runtime.GOMAXPROCS(cfg.Threads)
