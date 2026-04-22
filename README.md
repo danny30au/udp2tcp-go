@@ -6,6 +6,7 @@ A direct Go port of [udp2tcp](https://github.com/danny30au/udp2tcp) (Rust).
 ## Features
 
 - **Multi-core scaling** — `SO_REUSEPORT` per-worker sockets + `runtime.LockOSThread()` for OS-thread affinity; the kernel distributes datagrams across workers (software RSS)
+- **Multi-stream TCP** — optional `-tcp-streams N` opens N parallel TCP connections per UDP session and stripes packets round-robin across them, breaking the single-flow congestion-control / single-CPU-queue bottleneck
 - **WireGuard-compatible framing** — 2-byte big-endian length prefix (identical to wstunnel / wg-tcp-tunnel wire format)
 - **Bidirectional** — UDP→TCP (client side) or TCP→UDP (`-reverse`, server side)
 - **Sharded session table** — 256-shard striped RWMutex map; no global lock on the hot path
@@ -169,6 +170,7 @@ udp2tcp -listen 0.0.0.0:51820 -remote 127.0.0.1:51820 -reverse -threads 4
 | `-idle-timeout` | `UDP2TCP_IDLE_TIMEOUT` | 180 | Session idle timeout (seconds) |
 | `-nodelay` | `UDP2TCP_NODELAY` | true | TCP_NODELAY |
 | `-reuseport` | `UDP2TCP_REUSEPORT` | true | SO_REUSEPORT (Linux) |
+| `-tcp-streams` | `UDP2TCP_TCP_STREAMS` | 1 | Parallel TCP connections per UDP session (>1 stripes packets across N streams for higher throughput) |
 | `-log-level` | `UDP2TCP_LOG_LEVEL` | info | debug \| info \| warn \| error |
 
 ## Kernel tuning (OpenWrt / Linux)
