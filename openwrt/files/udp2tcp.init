@@ -11,16 +11,17 @@ PROG=/usr/bin/udp2tcp
 
 start_instance() {
 	local cfg="$1"
-	local enabled listen remote reverse threads log_level
+	local enabled listen remote reverse threads tcp_streams log_level
 
 	config_get_bool enabled  "$cfg" enabled  0
 	[ "$enabled" -eq 1 ] || return 0
 
-	config_get listen     "$cfg" listen     "0.0.0.0:51820"
-	config_get remote     "$cfg" remote     ""
-	config_get_bool reverse "$cfg" reverse  0
-	config_get threads    "$cfg" threads    "$(nproc)"
-	config_get log_level  "$cfg" log_level  "info"
+	config_get listen       "$cfg" listen       "0.0.0.0:51820"
+	config_get remote       "$cfg" remote       ""
+	config_get_bool reverse "$cfg" reverse      0
+	config_get threads      "$cfg" threads      "$(nproc)"
+	config_get tcp_streams  "$cfg" tcp_streams  "1"
+	config_get log_level    "$cfg" log_level    "info"
 
 	[ -z "$remote" ] && { logger -t udp2tcp "remote not set in config $cfg"; return 1; }
 
@@ -29,6 +30,7 @@ start_instance() {
 	procd_append_param command -listen "$listen"
 	procd_append_param command -remote "$remote"
 	procd_append_param command -threads "$threads"
+	procd_append_param command -tcp-streams "$tcp_streams"
 	procd_append_param command -log-level "$log_level"
 	[ "$reverse" -eq 1 ] && procd_append_param command -reverse
 

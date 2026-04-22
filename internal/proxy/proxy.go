@@ -16,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/danny30au/udp2tcp-go/internal/codec"
@@ -89,11 +90,20 @@ func RunUDPToTCP(cfg *config.Config, workerID int) error {
 	}
 }
 
-// tcpForwardTask is the per-session goroutine that owns one TCP connection.
+// tcpForwardTask is the per-session goroutine that owns one or more TCP
+// connections to the remote.
 //
-// Two concurrent paths:
-//  1. channel → TCP write (outbound WireGuard packets)
-//  2. TCP read → UDP reply back to client (inbound WireGuard packets)
+// When cfg.TCPStreams == 1 (default), a single TCP connection is used and the
+// behaviour is identical to the original single-stream implementation.
+//
+// When cfg.TCPStreams > 1, N parallel TCP connections are dialed and outbound
+// UDP→TCP packets are striped round-robin across them. This increases
+// throughput when a single TCP flow becomes the bottleneck (per-flow
+// congestion control, single-CPU softirq queue, middlebox per-flow shaping).
+// One reader goroutine per stream forwards inbound TCP frames back as UDP.
+//
+// The wire format is unchanged — each stream independently carries
+// length-prefixed wstunnel-compatible frames.
 func tcpForwardTask(
 	cfg *config.Config,
 	udpConn net.PacketConn,
@@ -108,70 +118,108 @@ func tcpForwardTask(
 		slog.Debug("session torn down", "client", clientAddr)
 	}()
 
-	tcpConn, err := net.Dial("tcp", cfg.Remote)
-	if err != nil {
-		metrics.IncErrors()
-		slog.Error("TCP dial failed", "worker", workerID,
-			"client", clientAddr, "remote", cfg.Remote, "err", err)
-		return
+	streams := cfg.TCPStreams
+	if streams < 1 {
+		streams = 1
 	}
-	defer tcpConn.Close()
-	applyTCPOpts(tcpConn, cfg)
 
-	slog.Info("TCP connected", "worker", workerID, "client", clientAddr, "remote", cfg.Remote)
+	// Dial all TCP streams up-front. If any dial fails, abort the session
+	// (closing any successfully-dialed conns) — partial sessions would mask
+	// failures from the operator and skew throughput.
+	conns := make([]*net.TCPConn, 0, streams)
+	writers := make([]*bufio.Writer, 0, streams)
+	closeAll := func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}
+	for i := 0; i < streams; i++ {
+		c, err := net.Dial("tcp", cfg.Remote)
+		if err != nil {
+			metrics.IncErrors()
+			slog.Error("TCP dial failed", "worker", workerID,
+				"client", clientAddr, "remote", cfg.Remote,
+				"stream", i, "err", err)
+			closeAll()
+			return
+		}
+		applyTCPOpts(c, cfg)
+		tc, ok := c.(*net.TCPConn)
+		if !ok {
+			// net.Dial("tcp", ...) always returns *net.TCPConn in the standard
+			// library; this guard is defensive against future changes.
+			metrics.IncErrors()
+			slog.Error("unexpected non-TCP connection",
+				"worker", workerID, "client", clientAddr, "stream", i)
+			_ = c.Close()
+			closeAll()
+			return
+		}
+		conns = append(conns, tc)
+		// Buffered writer — merges 2-byte header + payload into one write()
+		// for frames ≤ ~64 KB; critical for keeping syscall count low.
+		writers = append(writers, bufio.NewWriterSize(c, 65536))
+	}
+	defer closeAll()
 
-	// Buffered writer — merges 2-byte header + payload into one write() for
-	// frames ≤ ~64 KB; critical for keeping syscall count low.
-	tcpWriter := bufio.NewWriterSize(tcpConn, 65536)
+	slog.Info("TCP connected",
+		"worker", workerID, "client", clientAddr,
+		"remote", cfg.Remote, "streams", streams)
 
 	done := make(chan struct{})
+	var doneOnce sync.Once
 	closeDone := func() {
-		select {
-		case <-done:
-		default:
-			close(done)
-		}
+		doneOnce.Do(func() { close(done) })
 	}
 
-	// Path A: TCP inbound → UDP reply.
-	go func() {
-		defer closeDone()
-		readBuf := make([]byte, codec.MaxDatagramSize)
-		for {
-			frame, err := codec.ReadFrame(tcpConn, readBuf)
-			if err != nil {
-				if err != io.EOF {
-					metrics.IncErrors()
-					slog.Debug("TCP read error", "client", clientAddr, "err", err)
+	// Path A: TCP inbound → UDP reply, one reader per stream.
+	// net.PacketConn.WriteTo is safe for concurrent use.
+	for i := range conns {
+		c := conns[i]
+		go func(streamID int) {
+			defer closeDone()
+			readBuf := make([]byte, codec.MaxDatagramSize)
+			for {
+				frame, err := codec.ReadFrame(c, readBuf)
+				if err != nil {
+					if err != io.EOF {
+						metrics.IncErrors()
+						slog.Debug("TCP read error",
+							"client", clientAddr, "stream", streamID, "err", err)
+					}
+					return
 				}
-				return
+				// Copy frame before sending — ReadFrame returns a sub-slice of readBuf.
+				payload := make([]byte, len(frame))
+				copy(payload, frame)
+				if _, err := udpConn.WriteTo(payload, clientAddr); err != nil {
+					metrics.IncErrors()
+					slog.Debug("UDP WriteTo error",
+						"client", clientAddr, "stream", streamID, "err", err)
+					return
+				}
+				metrics.IncRx(uint64(len(payload)))
 			}
-			// Copy frame before sending — ReadFrame returns a sub-slice of readBuf.
-			payload := make([]byte, len(frame))
-			copy(payload, frame)
-			if _, err := udpConn.WriteTo(payload, clientAddr); err != nil {
-				metrics.IncErrors()
-				slog.Debug("UDP WriteTo error", "client", clientAddr, "err", err)
-				return
-			}
-			metrics.IncRx(uint64(len(payload)))
-		}
-	}()
+		}(i)
+	}
 
-	// Path B: channel → TCP outbound.
+	// Path B: channel → TCP outbound, round-robin across streams.
+	next := 0
 	for {
 		select {
 		case pkt, ok := <-sess.Ch:
 			if !ok {
 				return // channel closed by idle sweeper
 			}
-			if err := codec.WriteFrame(tcpWriter, pkt.Data); err != nil {
+			w := writers[next]
+			next = (next + 1) % streams
+			if err := codec.WriteFrame(w, pkt.Data); err != nil {
 				metrics.IncErrors()
 				slog.Debug("TCP write error", "client", clientAddr, "err", err)
 				closeDone()
 				return
 			}
-			if err := tcpWriter.Flush(); err != nil {
+			if err := w.Flush(); err != nil {
 				metrics.IncErrors()
 				closeDone()
 				return

@@ -48,6 +48,7 @@ func main() {
 		"listen", cfg.Listen,
 		"remote", cfg.Remote,
 		"threads", cfg.Threads,
+		"tcp_streams", cfg.TCPStreams,
 		"reuseport", cfg.ReusePort,
 	)
 

@@ -24,6 +24,7 @@ type Config struct {
 	IdleTimeout int    // session idle timeout in seconds
 	NoDelay     bool   // TCP_NODELAY
 	ReusePort   bool   // SO_REUSEPORT on UDP sockets
+	TCPStreams  int    // parallel TCP connections per UDP session (1 = single stream)
 	CPUPin      bool   // pin goroutines to CPU (via GOMAXPROCS sharding)
 	LogLevel    string // debug | info | warn | error
 }
@@ -43,6 +44,7 @@ func Parse() (*Config, error) {
 	flag.IntVar(&cfg.IdleTimeout, "idle-timeout", envInt("UDP2TCP_IDLE_TIMEOUT", 180), "Session idle timeout (seconds)")
 	flag.BoolVar(&cfg.NoDelay, "nodelay", envBool("UDP2TCP_NODELAY", true), "Enable TCP_NODELAY")
 	flag.BoolVar(&cfg.ReusePort, "reuseport", envBool("UDP2TCP_REUSEPORT", true), "Enable SO_REUSEPORT (Linux)")
+	flag.IntVar(&cfg.TCPStreams, "tcp-streams", envInt("UDP2TCP_TCP_STREAMS", 1), "Parallel TCP connections per UDP session (>=1)")
 	flag.BoolVar(&cfg.CPUPin, "cpu-pin", envBool("UDP2TCP_CPU_PIN", false), "Shard workers across GOMAXPROCS")
 	flag.StringVar(&cfg.LogLevel, "log-level", env("UDP2TCP_LOG_LEVEL", "info"), "Log level: debug|info|warn|error")
 
@@ -59,6 +61,9 @@ func Parse() (*Config, error) {
 	}
 	if cfg.Threads < 1 {
 		cfg.Threads = 1
+	}
+	if cfg.TCPStreams < 1 {
+		cfg.TCPStreams = 1
 	}
 	return cfg, nil
 }
