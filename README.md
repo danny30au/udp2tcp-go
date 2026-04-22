@@ -171,6 +171,8 @@ udp2tcp -listen 0.0.0.0:51820 -remote 127.0.0.1:51820 -reverse -threads 4
 | `-nodelay` | `UDP2TCP_NODELAY` | true | TCP_NODELAY |
 | `-reuseport` | `UDP2TCP_REUSEPORT` | true | SO_REUSEPORT (Linux) |
 | `-tcp-streams` | `UDP2TCP_TCP_STREAMS` | 1 | Parallel TCP connections per UDP session (>1 stripes packets across N streams for higher throughput) |
+| `-daemon` | `UDP2TCP_DAEMON` | false | Detach from the terminal and run as a background daemon (Unix). Combine with `-pidfile` for service management. |
+| `-pidfile` | `UDP2TCP_PIDFILE` | *(none)* | Write the running process PID to this file; removed on graceful shutdown. |
 | `-log-level` | `UDP2TCP_LOG_LEVEL` | info | debug \| info \| warn \| error |
 
 ## Kernel tuning (OpenWrt / Linux)

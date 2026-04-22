@@ -27,6 +27,8 @@ type Config struct {
 	TCPStreams  int    // parallel TCP connections per UDP session (1 = single stream)
 	CPUPin      bool   // pin goroutines to CPU (via GOMAXPROCS sharding)
 	LogLevel    string // debug | info | warn | error
+	Daemon      bool   // detach from terminal and run in background
+	PIDFile     string // path to write PID file (empty disables)
 }
 
 func Parse() (*Config, error) {
@@ -47,6 +49,8 @@ func Parse() (*Config, error) {
 	flag.IntVar(&cfg.TCPStreams, "tcp-streams", envInt("UDP2TCP_TCP_STREAMS", 1), "Parallel TCP connections per UDP session (>=1)")
 	flag.BoolVar(&cfg.CPUPin, "cpu-pin", envBool("UDP2TCP_CPU_PIN", false), "Shard workers across GOMAXPROCS")
 	flag.StringVar(&cfg.LogLevel, "log-level", env("UDP2TCP_LOG_LEVEL", "info"), "Log level: debug|info|warn|error")
+	flag.BoolVar(&cfg.Daemon, "daemon", envBool("UDP2TCP_DAEMON", false), "Detach from terminal and run as a background daemon")
+	flag.StringVar(&cfg.PIDFile, "pidfile", env("UDP2TCP_PIDFILE", ""), "Write process PID to this file (removed on exit)")
 
 	flag.Parse()
 

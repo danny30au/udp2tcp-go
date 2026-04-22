@@ -23,6 +23,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// If -daemon is set and we're still the foreground process, re-exec
+	// ourselves detached and exit. The child sees UDP2TCP_DAEMONIZED=1
+	// and falls through to normal startup below.
+	if cfg.Daemon {
+		isParent, derr := daemonize(cfg.PIDFile)
+		if derr != nil {
+			slog.Error("daemonize failed", "err", derr)
+			os.Exit(1)
+		}
+		if isParent {
+			return
+		}
+	} else if cfg.PIDFile != "" {
+		// Non-daemon mode: still honour -pidfile so users can manage the
+		// process with standard service tooling.
+		if err := writePIDFile(cfg.PIDFile, os.Getpid()); err != nil {
+			slog.Error("write pidfile", "path", cfg.PIDFile, "err", err)
+			os.Exit(1)
+		}
+	}
+	if cfg.PIDFile != "" {
+		defer removePIDFile(cfg.PIDFile)
+	}
+
 	// Configure structured logging.
 	lvl := slog.LevelInfo
 	switch cfg.LogLevel {
@@ -73,6 +97,7 @@ func main() {
 		s := <-sigCh
 		slog.Info("shutting down", "signal", s)
 		slog.Info("final stats", "summary", metrics.Summary())
+		removePIDFile(cfg.PIDFile)
 		os.Exit(0)
 	}()
 
