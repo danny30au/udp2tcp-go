@@ -1,0 +1,172 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          # ── x86 / x86-64 ────────────────────────────────────────────────
+          - target: x86_64
+            goos: linux
+            goarch: amd64
+            goamd64: v2        # OpenWrt x86-64 baseline (SSE2+)
+            suffix: linux-x86_64
+
+          - target: x86_64_v3
+            goos: linux
+            goarch: amd64
+            goamd64: v3        # Modern x86-64 (AVX2+) — faster on recent CPUs
+            suffix: linux-x86_64_v3
+
+          - target: x86
+            goos: linux
+            goarch: "386"
+            suffix: linux-x86
+
+          # ── ARM ─────────────────────────────────────────────────────────
+          - target: arm64
+            goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+
+          - target: armv7
+            goos: linux
+            goarch: arm
+            goarm: "7"
+            suffix: linux-armv7
+
+          - target: armv6
+            goos: linux
+            goarch: arm
+            goarm: "6"
+            suffix: linux-armv6
+
+          # ── MIPS (OpenWrt MT7620/MT7621/MT7628/Archer C7 etc.) ──────────
+          - target: mipsle_softfloat
+            goos: linux
+            goarch: mipsle
+            gomips: softfloat
+            suffix: linux-mipsle-softfloat
+
+          - target: mips_softfloat
+            goos: linux
+            goarch: mips
+            gomips: softfloat
+            suffix: linux-mips-softfloat
+
+          - target: mips64
+            goos: linux
+            goarch: mips64
+            suffix: linux-mips64
+
+          - target: mips64le
+            goos: linux
+            goarch: mips64le
+            suffix: linux-mips64le
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "VERSION=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build ${{ matrix.target }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOAMD64: ${{ matrix.goamd64 }}
+          GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          mkdir -p dist
+          go build \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -trimpath \
+            -o dist/udp2tcp-${{ matrix.suffix }} \
+            ./cmd/udp2tcp
+
+      - name: Checksum ${{ matrix.target }}
+        run: |
+          cd dist
+          sha256sum udp2tcp-${{ matrix.suffix }} >> ../checksums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: udp2tcp-${{ matrix.suffix }}
+          path: dist/udp2tcp-${{ matrix.suffix }}
+          retention-days: 7
+
+  # Collect checksums from all matrix jobs and create a GitHub Release.
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum udp2tcp-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/udp2tcp-*
+            dist/SHA256SUMS
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+
+  # Run tests and vet on every push/PR (non-tag runs).
+  test:
+    name: Test & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
